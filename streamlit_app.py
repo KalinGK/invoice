@@ -355,68 +355,228 @@ def main():
         st.markdown("- Multiple languages")
         st.markdown("- Various invoice layouts")
     
-    # File upload
-    uploaded_file = st.file_uploader(
-        "Upload Invoice Image", 
+    # File upload - Multiple files
+    uploaded_files = st.file_uploader(
+        "Upload Invoice Images", 
         type=['jpg', 'jpeg', 'png'],
-        help="Upload a clear image of your invoice"
+        help="Upload clear images of your invoices",
+        accept_multiple_files=True
     )
     
-    if uploaded_file is not None:
-        # Display uploaded image
+    if uploaded_files:
+        st.markdown(f"### {len(uploaded_files)} Invoice(s) Uploaded")
+        
+        # Initialize session state for multiple invoices
+        if 'all_extracted_data' not in st.session_state:
+            st.session_state.all_extracted_data = {}
+        
+        # Display uploaded images in a grid
+        if len(uploaded_files) <= 3:
+            cols = st.columns(len(uploaded_files))
+        else:
+            cols = st.columns(3)
+        
+        for idx, uploaded_file in enumerate(uploaded_files):
+            col_idx = idx % 3 if len(uploaded_files) > 3 else idx
+            with cols[col_idx]:
+                image = Image.open(uploaded_file)
+                st.image(image, caption=f"{uploaded_file.name[:20]}...", use_container_width=True)
+                st.write(f"**Size:** {uploaded_file.size / 1024:.1f} KB")
+        
+        # Batch processing options
         col1, col2 = st.columns([1, 1])
-        
         with col1:
-            st.markdown("### Uploaded Invoice")
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Invoice Image", use_container_width=True)
-        
+            process_all = st.button("🔍 Process All Invoices", type="primary", use_container_width=True)
         with col2:
-            st.markdown("### Image Information")
-            st.write(f"**Filename:** {uploaded_file.name}")
-            st.write(f"**File size:** {uploaded_file.size / 1024:.1f} KB")
-            st.write(f"**Image size:** {image.size[0]} × {image.size[1]} pixels")
+            selected_invoice = st.selectbox(
+                "Or process individually:",
+                options=["Select an invoice..."] + [f.name for f in uploaded_files]
+            )
+            process_single = st.button("🔍 Process Selected", use_container_width=True)
         
-        # Extract data button
-        if st.button("🔍 Extract Invoice Data", type="primary", use_container_width=True):
+        # Process all invoices
+        if process_all:
             if not api_key:
                 st.error("Please enter your Anthropic API key in the sidebar")
                 return
             
-            with st.spinner("Extracting invoice data... This may take a few seconds."):
-                # Reset file pointer
-                uploaded_file.seek(0)
-                image_base64 = encode_image(uploaded_file)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            successful_extractions = 0
+            failed_extractions = 0
+            
+            for idx, uploaded_file in enumerate(uploaded_files):
+                status_text.text(f"Processing {uploaded_file.name}... ({idx + 1}/{len(uploaded_files)})")
+                progress_bar.progress((idx + 1) / len(uploaded_files))
                 
-                # Extract data
-                extracted_data = extract_invoice_data(image_base64, api_key)
+                try:
+                    # Reset file pointer
+                    uploaded_file.seek(0)
+                    image_base64 = encode_image(uploaded_file)
+                    
+                    # Extract data
+                    extracted_data = extract_invoice_data(image_base64, api_key)
+                    
+                    if extracted_data:
+                        st.session_state.all_extracted_data[uploaded_file.name] = extracted_data
+                        successful_extractions += 1
+                    else:
+                        failed_extractions += 1
+                        
+                except Exception as e:
+                    st.error(f"Error processing {uploaded_file.name}: {str(e)}")
+                    failed_extractions += 1
+            
+            status_text.text("Processing complete!")
+            
+            if successful_extractions > 0:
+                st.success(f"✅ Successfully processed {successful_extractions} invoice(s)!")
+                if failed_extractions > 0:
+                    st.warning(f"⚠️ Failed to process {failed_extractions} invoice(s)")
+            else:
+                st.error("❌ Failed to process any invoices")
+        
+        # Process single invoice
+        elif process_single and selected_invoice != "Select an invoice...":
+            if not api_key:
+                st.error("Please enter your Anthropic API key in the sidebar")
+                return
+            
+            selected_file = next(f for f in uploaded_files if f.name == selected_invoice)
+            
+            with st.spinner(f"Processing {selected_invoice}..."):
+                try:
+                    # Reset file pointer
+                    selected_file.seek(0)
+                    image_base64 = encode_image(selected_file)
+                    
+                    # Extract data
+                    extracted_data = extract_invoice_data(image_base64, api_key)
+                    
+                    if extracted_data:
+                        st.session_state.all_extracted_data[selected_file.name] = extracted_data
+                        st.success(f"✅ Successfully processed {selected_invoice}!")
+                    else:
+                        st.error(f"❌ Failed to process {selected_invoice}")
+                        
+                except Exception as e:
+                    st.error(f"Error processing {selected_invoice}: {str(e)}")
+        
+        # Display extracted data
+        if st.session_state.all_extracted_data:
+            st.markdown("---")
+            st.markdown("## 📋 Extracted Invoice Data")
+            
+            # Create tabs for each invoice
+            if len(st.session_state.all_extracted_data) == 1:
+                # Single invoice - display directly
+                filename, data = next(iter(st.session_state.all_extracted_data.items()))
+                st.markdown(f"### {filename}")
+                display_invoice_data(data)
                 
-                if extracted_data:
-                    st.success("✅ Invoice data extracted successfully!")
-                    
-                    # Store in session state for persistence
-                    st.session_state.extracted_data = extracted_data
-                    
-                    # Display the extracted data
-                    st.markdown("---")
-                    display_invoice_data(extracted_data)
-                    
-                    # Download button for JSON
-                    json_str = json.dumps(extracted_data, indent=2, ensure_ascii=False)
+                # Download button
+                json_str = json.dumps(data, indent=2, ensure_ascii=False)
+                st.download_button(
+                    label=f"📥 Download {filename} JSON",
+                    data=json_str,
+                    file_name=f"invoice_data_{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            
+            else:
+                # Multiple invoices - use tabs
+                tab_names = list(st.session_state.all_extracted_data.keys())
+                tabs = st.tabs([f"📄 {name[:15]}..." if len(name) > 15 else f"📄 {name}" for name in tab_names])
+                
+                for tab, filename in zip(tabs, tab_names):
+                    with tab:
+                        display_invoice_data(st.session_state.all_extracted_data[filename])
+                        
+                        # Individual download button
+                        json_str = json.dumps(st.session_state.all_extracted_data[filename], indent=2, ensure_ascii=False)
+                        st.download_button(
+                            label=f"📥 Download JSON",
+                            data=json_str,
+                            file_name=f"invoice_data_{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                            mime="application/json",
+                            key=f"download_{filename}"
+                        )
+                
+                # Bulk download button
+                st.markdown("---")
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    # Download all as single JSON
+                    all_data = {"invoices": st.session_state.all_extracted_data}
+                    all_json_str = json.dumps(all_data, indent=2, ensure_ascii=False)
                     st.download_button(
-                        label="📥 Download JSON Data",
-                        data=json_str,
-                        file_name=f"invoice_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        label="📥 Download All JSON Data",
+                        data=all_json_str,
+                        file_name=f"all_invoices_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                         mime="application/json",
                         use_container_width=True
                     )
-                else:
-                    st.error("Failed to extract invoice data. Please try again.")
+                
+                with col2:
+                    # Create summary CSV
+                    summary_data = []
+                    for filename, data in st.session_state.all_extracted_data.items():
+                        invoice = data.get('invoice', {})
+                        summary_data.append({
+                            'filename': filename,
+                            'invoice_number': invoice.get('header', {}).get('invoice_number', ''),
+                            'company': invoice.get('billing_parties', {}).get('bill_from', {}).get('company_name', ''),
+                            'total_amount': invoice.get('totals', {}).get('total_amount', 0),
+                            'currency': invoice.get('header', {}).get('currency', ''),
+                            'balance_due': invoice.get('totals', {}).get('balance_due', 0),
+                            'invoice_date': invoice.get('header', {}).get('invoice_date', ''),
+                            'due_date': invoice.get('header', {}).get('due_date', '')
+                        })
+                    
+                    import csv
+                    import io
+                    
+                    csv_buffer = io.StringIO()
+                    if summary_data:
+                        writer = csv.DictWriter(csv_buffer, fieldnames=summary_data[0].keys())
+                        writer.writeheader()
+                        writer.writerows(summary_data)
+                    
+                    st.download_button(
+                        label="📊 Download Summary CSV",
+                        data=csv_buffer.getvalue(),
+                        file_name=f"invoice_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+        
+        # Clear data button
+        if st.session_state.all_extracted_data:
+            st.markdown("---")
+            if st.button("🗑️ Clear All Data", type="secondary", use_container_width=True):
+                st.session_state.all_extracted_data = {}
+                st.rerun()
     
-    # Display previously extracted data if available
-    elif 'extracted_data' in st.session_state:
-        st.info("Showing previously extracted data. Upload a new invoice to extract fresh data.")
-        display_invoice_data(st.session_state.extracted_data)
+    # Display previously extracted data if available and no new files uploaded
+    elif 'all_extracted_data' in st.session_state and st.session_state.all_extracted_data:
+        st.info("Showing previously extracted data. Upload new invoices to process fresh data.")
+        
+        # Display in tabs if multiple, single view if one
+        if len(st.session_state.all_extracted_data) == 1:
+            filename, data = next(iter(st.session_state.all_extracted_data.items()))
+            st.markdown(f"### Previous Result: {filename}")
+            display_invoice_data(data)
+        else:
+            st.markdown("## 📋 Previously Extracted Data")
+            tab_names = list(st.session_state.all_extracted_data.keys())
+            tabs = st.tabs([f"📄 {name[:15]}..." if len(name) > 15 else f"📄 {name}" for name in tab_names])
+            
+            for tab, filename in zip(tabs, tab_names):
+                with tab:
+                    display_invoice_data(st.session_state.all_extracted_data[filename])
 
 if __name__ == "__main__":
     main()
